@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  # Agent Core Service - 智能体核心服务
+  agent-core:
+    build:
+      context: ./agent-core
+      dockerfile: Dockerfile
+    container_name: agent-core
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM配置
+      - LLM_PROVIDER=openai
+      - LLM_MODEL=gpt-4-turbo-preview
+      - LLM_TEMPERATURE=0.7
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # 后端配置
+      - BACKEND_URL=http://drone-backend:3001
+      # 服务配置
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - drone-backend
+    networks:
+      - drone-network
+    restart: unless-stopped
+
+  # Drone Backend - 无人机后端服务（你现有的）
+  drone-backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: drone-backend
+    ports:
+      - "3001:3001"
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - drone-network
+    restart: unless-stopped
+
+  # Drone Frontend - React前端（你现有的）
+  drone-frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: drone-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_AGENT_API=http://localhost:8000
+      - REACT_APP_BACKEND_API=http://localhost:3001
+    depends_on:
+      - agent-core
+      - drone-backend
+    networks:
+      - drone-network
+    restart: unless-stopped
+
+  # Redis - 可选：用于会话缓存
+  redis:
+    image: redis:7-alpine
+    container_name: agent-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - drone-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  # PostgreSQL - 可选：用于对话历史持久化
+  postgres:
+    image: postgres:15-alpine
+    container_name: agent-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=agent_db
+      - POSTGRES_USER=agent
+      - POSTGRES_PASSWORD=agent123
+    networks:
+      - drone-network
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+networks:
+  drone-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  postgres_data:
