@@ -5,6 +5,8 @@ from app.plugins.drone_tools import (
     DroneTakeoffTool,
     DroneLandTool,
     DroneEmergencyStopTool,
+    DroneFlyDirectionTool,
+    DroneGoToTool,
     DroneStatusTool,
     # 任务控制
     DroneMissionTool,
@@ -36,6 +38,8 @@ __all__ = [
     "DroneTakeoffTool",
     "DroneLandTool",
     "DroneEmergencyStopTool",
+    "DroneFlyDirectionTool",
+    "DroneGoToTool",
     "DroneStatusTool",
     # 无人机 - 任务控制
     "DroneMissionTool",

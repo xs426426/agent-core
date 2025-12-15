@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # LLM Configuration
     llm_provider: str = "openai"  # openai, claude, ollama
     llm_model: str = "gpt-4-turbo-preview"
-    llm_temperature: float = 0.7
+    llm_temperature: float = 0.1  # 降低temperature减少重复调用的随机性
 
     # Custom API Base URLs (for third-party proxies)
     anthropic_api_base: Optional[str] = None
@@ -105,10 +105,10 @@ class Settings(BaseSettings):
     # Feature Flags
     enable_tool_confirmation: bool = False
     enable_streaming: bool = True
-    max_conversation_history: int = 30
+    max_conversation_history: int = 10  # 减少历史消息，避免错误累积
 
     # Memory Retention
-    memory_retention_days: int = 7
+    memory_retention_days: int = 0  # 设为0：不持久化，关闭后清空
 
     model_config = SettingsConfigDict(
         env_file=".env",

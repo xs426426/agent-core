@@ -31,7 +31,7 @@ class DroneTakeoffTool(BaseAgentTool):
     ]
 
     async def execute(self, altitude: float) -> Dict[str, Any]:
-        """执行起飞命令"""
+        """执行起飞命令 - 通过创建任务实现"""
         if altitude <= 0:
             return ToolResult.error_result("起飞高度必须大于0").to_dict()
         if altitude > 5:
@@ -39,22 +39,48 @@ class DroneTakeoffTool(BaseAgentTool):
 
         logger.info(f"Takeoff command: altitude={altitude}m")
 
+        # 创建包含起飞任务的 Mission
+        # 使用 Protobuf 格式: Mission { id, tasks: [{ take_off: {} }] }
+        # 注意: protobuf.js verify() 使用 proto 原始字段名 (snake_case)
+        mission_data = {
+            "id": f"takeoff_{int(altitude * 100)}",
+            "tasks": [
+                {"take_off": {}},  # 起飞任务 (snake_case)
+                {
+                    "auto_pilot": {  # snake_case
+                        "position": {"x": 0, "y": 0, "z": altitude},
+                        "yaw": 0
+                    }
+                }  # 悬停到目标高度
+            ]
+        }
+
         result = await self.http_request(
             method="POST",
-            endpoint="/api/command",
+            endpoint="/api/mission",
+            json_data=mission_data
+        )
+
+        if not result["success"]:
+            return ToolResult.error_result(result.get("error", "创建起飞任务失败")).to_dict()
+
+        # 启动任务执行
+        exec_result = await self.http_request(
+            method="POST",
+            endpoint="/api/execution",
             json_data={
-                "command": "takeoff",
-                "altitude": altitude
+                "id": mission_data["id"],
+                "action": 0  # START = 0
             }
         )
 
-        if result["success"]:
+        if exec_result["success"]:
             return ToolResult.success_result(
                 f"起飞命令已发送，目标高度 {altitude} 米",
                 data={"altitude": altitude}
             ).to_dict()
         else:
-            return ToolResult.error_result(result.get("error", "起飞命令失败")).to_dict()
+            return ToolResult.error_result(exec_result.get("error", "启动起飞任务失败")).to_dict()
 
 
 class DroneLandTool(BaseAgentTool):
@@ -69,19 +95,41 @@ class DroneLandTool(BaseAgentTool):
     parameters: List[ToolParameter] = []
 
     async def execute(self) -> Dict[str, Any]:
-        """执行降落命令"""
+        """执行降落命令 - 通过创建降落任务实现"""
         logger.info("Land command")
+
+        # 创建包含降落任务的 Mission
+        # 注意: protobuf.js verify() 使用 proto 原始字段名 (snake_case)
+        mission_data = {
+            "id": "land_mission",
+            "tasks": [
+                {"land": {}}  # 降落任务 (land 本身就没有下划线)
+            ]
+        }
 
         result = await self.http_request(
             method="POST",
-            endpoint="/api/command",
-            json_data={"command": "land"}
+            endpoint="/api/mission",
+            json_data=mission_data
         )
 
-        if result["success"]:
+        if not result["success"]:
+            return ToolResult.error_result(result.get("error", "创建降落任务失败")).to_dict()
+
+        # 启动任务执行
+        exec_result = await self.http_request(
+            method="POST",
+            endpoint="/api/execution",
+            json_data={
+                "id": mission_data["id"],
+                "action": 0  # START = 0
+            }
+        )
+
+        if exec_result["success"]:
             return ToolResult.success_result("降落命令已发送").to_dict()
         else:
-            return ToolResult.error_result(result.get("error", "降落命令失败")).to_dict()
+            return ToolResult.error_result(exec_result.get("error", "启动降落任务失败")).to_dict()
 
 
 class DroneEmergencyStopTool(BaseAgentTool):
@@ -96,13 +144,17 @@ class DroneEmergencyStopTool(BaseAgentTool):
     parameters: List[ToolParameter] = []
 
     async def execute(self) -> Dict[str, Any]:
-        """执行紧急停止"""
+        """执行紧急停止 - 通过停止当前任务实现"""
         logger.info("EMERGENCY STOP command")
 
+        # 停止当前任务
         result = await self.http_request(
             method="POST",
-            endpoint="/api/command",
-            json_data={"command": "emergency_stop"}
+            endpoint="/api/execution",
+            json_data={
+                "id": "emergency",
+                "action": 3  # STOP = 3
+            }
         )
 
         if result["success"]:
@@ -110,6 +162,157 @@ class DroneEmergencyStopTool(BaseAgentTool):
         else:
             return ToolResult.error_result(result.get("error", "紧急停止失败")).to_dict()
 
+
+class DroneFlyDirectionTool(BaseAgentTool):
+    """方向飞行工具"""
+
+    name: str = "drone_fly_direction"
+    description: str = (
+        "控制无人机向指定方向飞行指定距离。"
+        "支持方向：前(forward/x+)、后(backward/x-)、左(left/y+)、右(right/y-)、上(up/z+)、下(down/z-)。"
+        "需要先知道当前位置，可以通过 get_drone_status 获取。"
+        "使用场景：简单的方向控制，如'向前飞3米'。"
+    )
+    category: str = "drone_control"
+    backend_name: str = "drone"
+    requires_confirmation: bool = True
+
+    parameters: List[ToolParameter] = [
+        ToolParameter(
+            name="direction",
+            type="string",
+            description="飞行方向: forward(前), backward(后), left(左), right(右), up(上), down(下)",
+            required=True,
+            enum=["forward", "backward", "left", "right", "up", "down"]
+        ),
+        ToolParameter(
+            name="distance",
+            type="number",
+            description="飞行距离（米），范围: 0.5-10米",
+            required=True
+        ),
+        ToolParameter(
+            name="current_x",
+            type="number",
+            description="当前X坐标（米）",
+            required=True
+        ),
+        ToolParameter(
+            name="current_y",
+            type="number",
+            description="当前Y坐标（米）",
+            required=True
+        ),
+        ToolParameter(
+            name="current_z",
+            type="number",
+            description="当前Z坐标/高度（米）",
+            required=True
+        ),
+        ToolParameter(
+            name="speed",
+            type="number",
+            description="飞行速度 (m/s)",
+            required=False,
+            default=0.5
+        )
+    ]
+
+    async def execute(
+        self,
+        direction: str,
+        distance: float,
+        current_x: float,
+        current_y: float,
+        current_z: float,
+        speed: float = 0.5
+    ) -> Dict[str, Any]:
+        """执行方向飞行"""
+        if distance <= 0 or distance > 10:
+            return ToolResult.error_result("飞行距离必须在 0.5-10 米范围内").to_dict()
+
+        direction = direction.lower()
+
+        # 计算目标位置
+        target_x = current_x
+        target_y = current_y
+        target_z = current_z
+
+        direction_map = {
+            "forward": ("x", 1, "前"),
+            "backward": ("x", -1, "后"),
+            "left": ("y", 1, "左"),
+            "right": ("y", -1, "右"),
+            "up": ("z", 1, "上"),
+            "down": ("z", -1, "下")
+        }
+
+        if direction not in direction_map:
+            return ToolResult.error_result(f"不支持的方向: {direction}").to_dict()
+
+        axis, sign, cn_dir = direction_map[direction]
+
+        if axis == "x":
+            target_x = current_x + (distance * sign)
+        elif axis == "y":
+            target_y = current_y + (distance * sign)
+        elif axis == "z":
+            target_z = current_z + (distance * sign)
+            if target_z < 0.3:
+                return ToolResult.error_result("目标高度过低，最低高度为0.3米").to_dict()
+            if target_z > 5:
+                return ToolResult.error_result("室内目标高度不建议超过5米").to_dict()
+
+        logger.info(f"Fly {direction} {distance}m: ({current_x},{current_y},{current_z}) -> ({target_x},{target_y},{target_z})")
+
+        # 创建 Line 任务
+        # 注意: protobuf.js verify() 使用 proto 原始字段名 (snake_case)
+        mission_data = {
+            "id": f"fly_{direction}_{int(distance*100)}",
+            "tasks": [
+                {
+                    "line": {
+                        "start": {"x": current_x, "y": current_y, "z": current_z},
+                        "end": {"x": target_x, "y": target_y, "z": target_z},
+                        "yaw_mode": 0,  # FIXED - 保持当前航向 (snake_case)
+                        "yaw_fixed": 0,  # snake_case
+                        "max_speed": speed,  # snake_case
+                        "max_accel": 0.5  # snake_case
+                    }
+                }
+            ]
+        }
+
+        result = await self.http_request(
+            method="POST",
+            endpoint="/api/mission",
+            json_data=mission_data
+        )
+
+        if not result["success"]:
+            return ToolResult.error_result(result.get("error", "创建飞行任务失败")).to_dict()
+
+        # 启动任务
+        exec_result = await self.http_request(
+            method="POST",
+            endpoint="/api/execution",
+            json_data={
+                "id": mission_data["id"],
+                "action": 0  # START
+            }
+        )
+
+        if exec_result["success"]:
+            return ToolResult.success_result(
+                f"已发送向{cn_dir}飞行 {distance} 米的指令，目标位置: ({target_x:.2f}, {target_y:.2f}, {target_z:.2f})",
+                data={
+                    "direction": direction,
+                    "distance": distance,
+                    "target": {"x": target_x, "y": target_y, "z": target_z}
+                }
+            ).to_dict()
+        else:
+            return ToolResult.error_result(exec_result.get("error", "启动飞行任务失败")).to_dict()
 
 class DroneStatusTool(BaseAgentTool):
     """查询系统状态工具"""
@@ -149,6 +352,101 @@ class DroneStatusTool(BaseAgentTool):
             ).to_dict()
         else:
             return ToolResult.error_result(result.get("error", "状态查询失败")).to_dict()
+
+
+class DroneGoToTool(BaseAgentTool):
+    """直接前往指定坐标工具"""
+
+    name: str = "drone_go_to"
+    description: str = (
+        "控制无人机直接飞到指定的三维坐标位置。"
+        "使用场景：用户说'前往x,y,z'、'飞到坐标(x,y,z)'、'去位置x,y,z'等。"
+        "这是最简单的点到点飞行方式。"
+    )
+    category: str = "drone_control"
+    backend_name: str = "drone"
+    requires_confirmation: bool = True
+
+    parameters: List[ToolParameter] = [
+        ToolParameter(
+            name="x",
+            type="number",
+            description="目标X坐标（米）",
+            required=True
+        ),
+        ToolParameter(
+            name="y",
+            type="number",
+            description="目标Y坐标（米）",
+            required=True
+        ),
+        ToolParameter(
+            name="z",
+            type="number",
+            description="目标Z坐标/高度（米），建议范围0.5-5米",
+            required=True
+        ),
+        ToolParameter(
+            name="speed",
+            type="number",
+            description="飞行速度 (m/s)，默认0.5",
+            required=False,
+            default=0.5
+        )
+    ]
+
+    async def execute(self, x: float, y: float, z: float, speed: float = 0.5) -> Dict[str, Any]:
+        """执行前往指定坐标"""
+        # 参数验证
+        if z < 0.3:
+            return ToolResult.error_result("目标高度过低，最低高度为0.3米").to_dict()
+        if z > 5:
+            return ToolResult.error_result("室内目标高度不建议超过5米").to_dict()
+        if speed <= 0 or speed > 2:
+            return ToolResult.error_result("速度必须在 0-2 m/s 范围内").to_dict()
+
+        logger.info(f"Go to position: ({x}, {y}, {z}) at speed {speed}m/s")
+
+        # 创建 auto_pilot 任务直接飞到目标位置
+        # 注意: protobuf.js verify() 使用 proto 原始字段名 (snake_case)
+        mission_data = {
+            "id": f"goto_{int(x*100)}_{int(y*100)}_{int(z*100)}",
+            "tasks": [
+                {
+                    "auto_pilot": {  # snake_case
+                        "position": {"x": x, "y": y, "z": z},
+                        "yaw": 0
+                    }
+                }
+            ]
+        }
+
+        result = await self.http_request(
+            method="POST",
+            endpoint="/api/mission",
+            json_data=mission_data
+        )
+
+        if not result["success"]:
+            return ToolResult.error_result(result.get("error", "创建飞行任务失败")).to_dict()
+
+        # 启动任务
+        exec_result = await self.http_request(
+            method="POST",
+            endpoint="/api/execution",
+            json_data={
+                "id": mission_data["id"],
+                "action": 0  # START
+            }
+        )
+
+        if exec_result["success"]:
+            return ToolResult.success_result(
+                f"已发送飞往坐标 ({x}, {y}, {z}) 的指令，飞行速度 {speed} m/s",
+                data={"target": {"x": x, "y": y, "z": z}, "speed": speed}
+            ).to_dict()
+        else:
+            return ToolResult.error_result(exec_result.get("error", "启动飞行任务失败")).to_dict()
 
 
 # ============================================================
@@ -191,7 +489,7 @@ class DroneMissionTool(BaseAgentTool):
     ]
 
     async def execute(self, waypoints: List[Dict], speed: float = 0.5, mission_id: str = "mission_001") -> Dict[str, Any]:
-        """发布航点任务"""
+        """发布航点任务 - 使用 Protobuf Line 任务格式"""
         if not waypoints or len(waypoints) == 0:
             return ToolResult.error_result("航点列表不能为空").to_dict()
 
@@ -212,15 +510,43 @@ class DroneMissionTool(BaseAgentTool):
 
         logger.info(f"Creating mission: {len(formatted_waypoints)} waypoints, speed={speed}m/s")
 
+        # 构建 Protobuf Mission 格式
+        # 将航点列表转换为 Line 任务列表（每两个相邻航点构成一条线段）
+        # 注意: protobuf.js verify() 使用 proto 原始字段名 (snake_case)
+        tasks = []
+
+        # 将航点转换为 Line 任务
+        for i, wp in enumerate(formatted_waypoints):
+            if i == 0:
+                # 第一个点使用 auto_pilot 飞到
+                tasks.append({
+                    "auto_pilot": {  # snake_case
+                        "position": {"x": wp["x"], "y": wp["y"], "z": wp["z"]},
+                        "yaw": 0
+                    }
+                })
+            else:
+                # 后续点使用 Line 从前一点飞到当前点
+                prev_wp = formatted_waypoints[i - 1]
+                tasks.append({
+                    "line": {
+                        "start": {"x": prev_wp["x"], "y": prev_wp["y"], "z": prev_wp["z"]},
+                        "end": {"x": wp["x"], "y": wp["y"], "z": wp["z"]},
+                        "yaw_mode": 1,  # TARGET - 指向目标 (snake_case)
+                        "max_speed": speed,  # snake_case
+                        "max_accel": 0.5  # snake_case
+                    }
+                })
+
+        mission_data = {
+            "id": mission_id,
+            "tasks": tasks
+        }
+
         result = await self.http_request(
             method="POST",
             endpoint="/api/mission",
-            json_data={
-                "id": mission_id,
-                "type": "waypoint",
-                "waypoints": formatted_waypoints,
-                "speed": speed
-            }
+            json_data=mission_data
         )
 
         if result["success"]:
@@ -236,7 +562,7 @@ class DroneMissionControlTool(BaseAgentTool):
     """任务执行控制工具"""
 
     name: str = "drone_mission_control"
-    description: str = "控制无人机任务的执行状态：启动(start)、暂停(pause)、恢复(resume)、取消(cancel)任务。"
+    description: str = "控制无人机任务的执行状态：启动(start)、暂停(pause)、恢复(resume)、取消(stop)、清除(clear)任务。"
     category: str = "drone_mission"
     backend_name: str = "drone"
 
@@ -246,7 +572,7 @@ class DroneMissionControlTool(BaseAgentTool):
             type="string",
             description="操作类型",
             required=True,
-            enum=["start", "pause", "resume", "cancel", "clear"]
+            enum=["start", "pause", "resume", "stop", "clear"]
         ),
         ToolParameter(
             name="mission_id",
@@ -258,15 +584,29 @@ class DroneMissionControlTool(BaseAgentTool):
     ]
 
     async def execute(self, action: str, mission_id: str = "mission_001") -> Dict[str, Any]:
-        """控制任务执行"""
+        """控制任务执行 - 使用 Protobuf Execution 格式"""
         action = action.lower()
-        action_map = {
+
+        # Protobuf Execution.Action 枚举值
+        # START = 0, PAUSE = 1, RESUME = 2, STOP = 3, CLEAR = 4
+        action_to_enum = {
+            "start": 0,
+            "pause": 1,
+            "resume": 2,
+            "stop": 3,
+            "clear": 4
+        }
+
+        action_to_chinese = {
             "start": "启动",
             "pause": "暂停",
             "resume": "恢复",
-            "cancel": "取消",
+            "stop": "停止",
             "clear": "清除"
         }
+
+        if action not in action_to_enum:
+            return ToolResult.error_result(f"不支持的操作: {action}").to_dict()
 
         logger.info(f"Mission control: action={action}, mission_id={mission_id}")
 
@@ -274,14 +614,14 @@ class DroneMissionControlTool(BaseAgentTool):
             method="POST",
             endpoint="/api/execution",
             json_data={
-                "mission_id": mission_id,
-                "action": action
+                "id": mission_id,
+                "action": action_to_enum[action]  # 使用数字枚举值
             }
         )
 
         if result["success"]:
             return ToolResult.success_result(
-                f"任务已{action_map.get(action, action)}",
+                f"任务已{action_to_chinese.get(action, action)}",
                 data={"action": action, "mission_id": mission_id}
             ).to_dict()
         else:

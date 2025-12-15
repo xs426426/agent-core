@@ -23,16 +23,38 @@ class IntelligentAgent:
     """
 
     # 系统提示词
-    SYSTEM_PROMPT = """你是一个智能无人机控制助手。你可以理解自然语言指令并通过调用工具来控制无人机。
+    SYSTEM_PROMPT = """你是一个智能无人机控制助手。你必须通过调用工具来控制无人机。
 
-重要规则：
-1. 当用户请求查询无人机状态时，你必须调用 get_drone_status 工具
-2. 当用户请求起飞时，你必须调用 drone_takeoff 工具
-3. 当用户请求降落时，你必须调用 drone_land 工具
-4. 不要编造任何数据，所有信息必须来自工具调用的返回结果
-5. 如果工具调用失败，请告诉用户实际的错误信息
+【核心规则 - 必须遵守】
+1. 当用户请求控制无人机时，你必须调用相应的工具，不要只是文字回复
+2. 每个用户请求只调用一次工具，不要重复调用
 
-请根据用户的请求选择合适的工具并执行。
+【工具选择指南】
+- "前往x,y,z" / "飞到坐标" / "去位置" → 调用 drone_go_to(x, y, z)
+- "起飞" / "起飞到x米" → 调用 drone_takeoff(altitude)
+- "降落" → 调用 drone_land()
+- "查询状态" / "无人机状态" → 调用 get_drone_status()
+- "紧急停止" → 调用 drone_emergency_stop()
+- "多个航点" / "先...再..." / "依次飞" → 调用 drone_mission(waypoints)
+
+【单点飞行】使用 drone_go_to
+当用户说"前往x,y,z"或方向飞行时，计算目标坐标后调用 drone_go_to。
+坐标系：前=X+，后=X-，左=Y+，右=Y-，上=Z+，下=Z-
+
+【多航点任务】使用 drone_mission
+当用户说"先...再..."、"两个航点"、"依次飞往"时，使用 drone_mission。
+waypoints 参数格式：[{"x":1,"y":2,"z":3}, {"x":4,"y":5,"z":6}]
+
+例如：用户在(3,9,1)，要"先向前5米，再向左4米"
+- 第一航点：(3+5, 9, 1) = (8, 9, 1)
+- 第二航点：(8, 9+4, 1) = (8, 13, 1)
+- 调用：drone_mission(waypoints=[{"x":8,"y":9,"z":1}, {"x":8,"y":13,"z":1}])
+
+【重要】
+- 用户告诉你当前位置时，直接使用该位置计算，不要再查询状态
+- 不要编造数据，所有信息必须来自工具调用结果
+- 如果工具调用失败，告诉用户实际的错误信息
+- 不要使用 drone_fly_direction 工具（测试环境禁用）
 """
 
     def __init__(
@@ -117,10 +139,23 @@ class IntelligentAgent:
         logger.info(f"Created new conversation: {session_id}")
         return conversation
 
-    def _format_messages(self, conversation: Conversation) -> List:
-        """格式化对话历史为消息列表"""
+    def _format_messages(self, conversation: Conversation, exclude_last: bool = False) -> List:
+        """
+        格式化对话历史为消息列表
+
+        Args:
+            conversation: 对话对象
+            exclude_last: 是否排除最后一条消息（避免重复）
+        """
         messages = []
-        for msg in conversation.get_history(limit=settings.max_conversation_history):
+        # 限制历史消息数量，避免递归限制问题
+        history = conversation.get_history(limit=settings.max_conversation_history)
+
+        # 如果需要排除最后一条
+        if exclude_last and len(history) > 0:
+            history = history[:-1]
+
+        for msg in history:
             if msg.role == MessageRole.USER:
                 messages.append(HumanMessage(content=msg.content))
             elif msg.role == MessageRole.ASSISTANT:
@@ -157,17 +192,33 @@ class IntelligentAgent:
             # 持久化保存用户消息
             self.memory_store.save_message(session_id, user_message)
 
-            # 构建消息列表
-            messages = self._format_messages(conversation)
+            # 构建消息列表（排除刚添加的消息，避免重复）
+            messages = self._format_messages(conversation, exclude_last=True)
             # 添加当前消息
             messages.append(HumanMessage(content=user_input))
 
-            # 调用 Agent
-            result = await self.agent.ainvoke({"messages": messages})
+            # 调用 Agent（设置递归限制避免无限循环）
+            logger.info(f"[{session_id}] Invoking agent with {len(messages)} messages...")
+            result = await self.agent.ainvoke(
+                {"messages": messages},
+                config={"recursion_limit": 50}
+            )
 
             # 提取响应
             response_messages = result.get("messages", [])
             response_text = "抱歉，我无法处理这个请求。"
+
+            # 调试：打印所有返回的消息
+            logger.info(f"[{session_id}] Agent returned {len(response_messages)} messages")
+            for i, msg in enumerate(response_messages):
+                msg_type = type(msg).__name__
+                content_preview = str(msg.content)[:200] if hasattr(msg, 'content') else 'N/A'
+                # 检查是否有工具调用
+                tool_calls = getattr(msg, 'tool_calls', None)
+                if tool_calls:
+                    logger.info(f"[{session_id}] Message[{i}] type={msg_type}, tool_calls={tool_calls}")
+                else:
+                    logger.info(f"[{session_id}] Message[{i}] type={msg_type}, content={content_preview}")
 
             # 获取最后一个 AI 消息作为响应
             for msg in reversed(response_messages):

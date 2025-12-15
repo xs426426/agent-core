@@ -4,9 +4,13 @@ Agent 对话命令行工具
 """
 import httpx
 import sys
+import uuid
 
 AGENT_URL = "http://localhost:8000/api/agent/chat"
-SESSION_ID = "cli-user"
+CLEAR_URL = "http://localhost:8000/api/agent/conversations"
+
+# 每次启动使用新的会话ID，避免历史消息干扰
+SESSION_ID = f"cli-{uuid.uuid4().hex[:8]}"
 
 def chat(message: str) -> str:
     """发送消息给 Agent"""
@@ -26,11 +30,20 @@ def chat(message: str) -> str:
     except Exception as e:
         return f"错误: {str(e)}"
 
+def clear_session():
+    """清空当前会话"""
+    try:
+        httpx.delete(f"{CLEAR_URL}/{SESSION_ID}", timeout=10.0)
+        return True
+    except:
+        return False
+
 def main():
     print("=" * 50)
     print("  Agent 对话终端")
     print("  输入自然语言和无人机 Agent 对话")
-    print("  输入 'quit' 或 'exit' 退出")
+    print(f"  会话ID: {SESSION_ID}")
+    print("  命令: 'quit'退出, 'clear'清空会话")
     print("=" * 50)
     print()
 
@@ -44,6 +57,13 @@ def main():
             if user_input.lower() in ["quit", "exit", "q"]:
                 print("再见!")
                 break
+
+            if user_input.lower() == "clear":
+                if clear_session():
+                    print("会话已清空")
+                else:
+                    print("清空会话失败")
+                continue
 
             print("Agent 思考中...")
             response = chat(user_input)

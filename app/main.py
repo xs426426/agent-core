@@ -14,6 +14,8 @@ from app.plugins import (
     DroneTakeoffTool,
     DroneLandTool,
     DroneEmergencyStopTool,
+    DroneFlyDirectionTool,
+    DroneGoToTool,
     DroneStatusTool,
     # 任务控制
     DroneMissionTool,
@@ -55,12 +57,14 @@ async def lifespan(app: FastAPI):
         logger.info(f"  - {name}: {config['url']}")
 
     try:
-        # 初始化所有工具 (13个工具)
+        # 初始化所有工具 (15个工具)
         drone_tools = [
-            # 基础控制 (4个)
+            # 基础控制 (6个)
             DroneTakeoffTool(),
             DroneLandTool(),
             DroneEmergencyStopTool(),
+            DroneFlyDirectionTool(),
+            DroneGoToTool(),
             DroneStatusTool(),
             # 任务控制 (2个)
             DroneMissionTool(),
@@ -177,7 +181,7 @@ async def root():
         "documentation": "/docs",
         "backends": backend_registry.list_backends(),
         "tools": {
-            "control": ["drone_takeoff", "drone_land", "drone_emergency_stop", "get_drone_status"],
+            "control": ["drone_takeoff", "drone_land", "drone_emergency_stop", "drone_fly_direction", "drone_go_to", "get_drone_status"],
             "mission": ["drone_mission", "drone_mission_control"],
             "exploration": ["drone_exploration_start", "drone_exploration_stop", "drone_exploration_pause", "drone_exploration_status"],
             "routes": ["drone_list_routes", "drone_load_route", "drone_save_route"]

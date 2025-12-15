@@ -3,13 +3,23 @@
 所有自定义工具都应继承此类
 支持动态后端配置和通用HTTP调用
 """
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, List, Type
+from pydantic import BaseModel, Field, create_model
 from langchain_core.tools import BaseTool as LangChainBaseTool
 from langchain_core.callbacks import CallbackManagerForToolRun, AsyncCallbackManagerForToolRun
 import httpx
+import time
+import hashlib
+import json
 from app.utils import logger
 from app.config import backend_registry
+
+
+# 全局去重缓存：存储最近执行的工具调用
+# 格式: {call_hash: (timestamp, result)}
+_tool_call_cache: Dict[str, tuple] = {}
+# 缓存过期时间（秒）- 同一调用在此时间内不会重复执行
+CACHE_EXPIRY_SECONDS = 3.0
 
 
 class ToolParameter(BaseModel):
@@ -20,6 +30,53 @@ class ToolParameter(BaseModel):
     required: bool = Field(True, description="是否必需")
     default: Any = Field(None, description="默认值")
     enum: Optional[List[Any]] = Field(None, description="枚举值列表")
+
+
+def _create_args_schema(tool_name: str, parameters: List[ToolParameter]) -> Type[BaseModel]:
+    """
+    从 ToolParameter 列表动态创建 Pydantic 模型作为 args_schema
+
+    这是 LangChain 工具调用所必需的 - 没有 args_schema，LLM 无法正确生成工具调用参数
+    """
+    if not parameters:
+        # 无参数工具
+        return create_model(f"{tool_name}Args")
+
+    # 类型映射
+    type_map = {
+        "string": str,
+        "number": float,
+        "integer": int,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+
+    field_definitions = {}
+    for param in parameters:
+        python_type = type_map.get(param.type, str)
+
+        # 构建 Field 参数
+        if param.required:
+            if param.default is not None:
+                field_definitions[param.name] = (
+                    python_type,
+                    Field(default=param.default, description=param.description)
+                )
+            else:
+                field_definitions[param.name] = (
+                    python_type,
+                    Field(..., description=param.description)
+                )
+        else:
+            # 可选参数
+            default_val = param.default if param.default is not None else None
+            field_definitions[param.name] = (
+                Optional[python_type],
+                Field(default=default_val, description=param.description)
+            )
+
+    return create_model(f"{tool_name}Args", **field_definitions)
 
 
 class ToolResult(BaseModel):
@@ -70,6 +127,13 @@ class BaseAgentTool(LangChainBaseTool):
 
     # LangChain要求的属性
     return_direct: bool = False
+
+    def __init__(self, **data):
+        """初始化工具，自动生成 args_schema"""
+        super().__init__(**data)
+        # 动态生成 args_schema（LangChain 需要这个来生成工具调用的参数模式）
+        # 即使是无参数工具也需要设置空的 args_schema
+        self.args_schema = _create_args_schema(self.name, self.parameters)
 
     def get_backend_url(self) -> Optional[str]:
         """获取关联后端的URL"""
@@ -188,18 +252,54 @@ class BaseAgentTool(LangChainBaseTool):
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
         **kwargs
     ) -> str:
-        """异步执行入口（LangChain调用）"""
-        logger.info(f"Executing tool (async): {self.name} with params: {kwargs}")
+        """异步执行入口（LangChain调用）- 带去重缓存"""
+        global _tool_call_cache
+
+        # 生成调用哈希（工具名 + 参数）
+        call_key = f"{self.name}:{json.dumps(kwargs, sort_keys=True, default=str)}"
+        call_hash = hashlib.md5(call_key.encode()).hexdigest()
+
+        current_time = time.time()
+
+        # 清理过期缓存
+        expired_keys = [
+            k for k, (ts, _) in _tool_call_cache.items()
+            if current_time - ts > CACHE_EXPIRY_SECONDS
+        ]
+        for k in expired_keys:
+            del _tool_call_cache[k]
+
+        # 检查是否有重复调用
+        if call_hash in _tool_call_cache:
+            cached_time, cached_result = _tool_call_cache[call_hash]
+            time_diff = current_time - cached_time
+            logger.warning(
+                f"========== DUPLICATE TOOL CALL BLOCKED: {self.name} ==========\n"
+                f"Same call was made {time_diff:.2f}s ago. Returning cached result."
+            )
+            return cached_result
+
+        logger.info(f"========== TOOL CALL: {self.name} ==========")
+        logger.info(f"Params: {kwargs}")
 
         try:
             result = await self.execute(**kwargs)
-            return self._format_result(result)
+            formatted_result = self._format_result(result)
+
+            # 缓存结果
+            _tool_call_cache[call_hash] = (current_time, formatted_result)
+
+            logger.info(f"========== TOOL DONE: {self.name} - Success: {result.get('success')} ==========")
+            return formatted_result
         except Exception as e:
             logger.error(f"Tool {self.name} execution failed: {str(e)}", exc_info=True)
-            return self._format_result({
+            error_result = self._format_result({
                 "success": False,
                 "error": f"执行失败: {str(e)}"
             })
+            # 错误结果也缓存，防止重复错误调用
+            _tool_call_cache[call_hash] = (current_time, error_result)
+            return error_result
 
     def _format_result(self, result: Dict[str, Any]) -> str:
         """格式化返回结果为字符串"""
