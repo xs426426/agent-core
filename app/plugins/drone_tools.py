@@ -315,43 +315,79 @@ class DroneFlyDirectionTool(BaseAgentTool):
             return ToolResult.error_result(exec_result.get("error", "启动飞行任务失败")).to_dict()
 
 class DroneStatusTool(BaseAgentTool):
-    """查询系统状态工具"""
+    """查询无人机状态和位置工具"""
 
     name: str = "get_drone_status"
-    description: str = "获取无人机系统当前状态，包括MQTT连接状态、运行模式等。"
+    description: str = "获取无人机当前状态，包括位置坐标(x,y,z)、姿态、速度等实时数据。用于了解无人机在哪里。"
     category: str = "drone_status"
     backend_name: str = "drone"
 
     parameters: List[ToolParameter] = []
 
     async def execute(self) -> Dict[str, Any]:
-        """查询状态"""
-        logger.info("Querying drone status")
+        """查询无人机状态和位置"""
+        logger.info("Querying drone status and odometry")
 
-        result = await self.http_request(
+        # 先获取位姿数据
+        odometry_result = await self.http_request(
+            method="GET",
+            endpoint="/api/drone/odometry",
+            timeout=5.0
+        )
+
+        # 再获取系统状态
+        status_result = await self.http_request(
             method="GET",
             endpoint="/api/status",
             timeout=5.0
         )
 
-        if result["success"]:
-            data = result.get("data", {})
-            mqtt_status = data.get("mqtt", {})
-            ws_status = data.get("websocket", {})
+        if not odometry_result["success"] and not status_result["success"]:
+            return ToolResult.error_result("状态查询失败").to_dict()
 
-            status_msg = (
-                f"MQTT连接: {'已连接' if mqtt_status.get('connected') else '未连接'}\n"
-                f"Broker: {mqtt_status.get('broker', 'N/A')}\n"
-                f"运行模式: {data.get('modeDescription', data.get('mode', '未知'))}\n"
-                f"WebSocket客户端: {ws_status.get('clients', 0)}"
-            )
+        # 解析位姿数据
+        pos = odometry_result.get("data", {}).get("position", {})
+        orient = odometry_result.get("data", {}).get("orientation", {})
+        vel = odometry_result.get("data", {}).get("velocity", {})
+        is_stale = odometry_result.get("data", {}).get("isStale", True)
 
-            return ToolResult.success_result(
-                "系统状态查询成功",
-                data={"status_text": status_msg, "raw_data": data}
-            ).to_dict()
-        else:
-            return ToolResult.error_result(result.get("error", "状态查询失败")).to_dict()
+        # 解析系统状态
+        status_data = status_result.get("data", {})
+        mqtt_status = status_data.get("mqtt", {})
+
+        # 构建状态消息
+        status_parts = []
+
+        # 位置信息
+        if pos and not is_stale:
+            status_parts.append(f"当前位置: x={pos.get('x', 0):.2f}m, y={pos.get('y', 0):.2f}m, z={pos.get('z', 0):.2f}m")
+        elif is_stale:
+            status_parts.append("位置数据: 暂无实时数据（无人机可能未启动）")
+
+        # 速度信息
+        if vel and not is_stale:
+            speed = (vel.get('x', 0)**2 + vel.get('y', 0)**2 + vel.get('z', 0)**2) ** 0.5
+            if speed > 0.01:
+                status_parts.append(f"当前速度: {speed:.2f} m/s")
+
+        # 系统状态
+        if mqtt_status:
+            status_parts.append(f"MQTT连接: {'已连接' if mqtt_status.get('connected') else '未连接'}")
+        status_parts.append(f"运行模式: {status_data.get('modeDescription', status_data.get('mode', '未知'))}")
+
+        status_msg = "\n".join(status_parts)
+
+        return ToolResult.success_result(
+            "状态查询成功",
+            data={
+                "status_text": status_msg,
+                "position": pos if not is_stale else None,
+                "orientation": orient if not is_stale else None,
+                "velocity": vel if not is_stale else None,
+                "is_stale": is_stale,
+                "system_status": status_data
+            }
+        ).to_dict()
 
 
 class DroneGoToTool(BaseAgentTool):
