@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
+    # Vision Model Configuration (for camera analysis)
+    qwen_api_key: Optional[str] = None  # 通义千问VL API Key
+    ollama_url: str = "http://localhost:11434"  # 本地Ollama服务地址
+
     # 默认后端配置（兼容旧配置）
     backend_url: str = "http://localhost:3001"
 

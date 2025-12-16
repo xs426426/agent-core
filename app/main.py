@@ -28,7 +28,11 @@ from app.plugins import (
     # 预设航线
     DroneListRoutesTool,
     DroneLoadRouteTool,
-    DroneSaveRouteTool
+    DroneSaveRouteTool,
+    # 视觉分析
+    VisionAnalysisTool,
+    DetectObstaclesTool,
+    FindObjectTool
 )
 from app.api import chat, tools, health, backends
 from app.utils import logger
@@ -57,7 +61,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"  - {name}: {config['url']}")
 
     try:
-        # 初始化所有工具 (15个工具)
+        # 初始化所有工具 (18个工具)
         drone_tools = [
             # 基础控制 (6个)
             DroneTakeoffTool(),
@@ -77,7 +81,11 @@ async def lifespan(app: FastAPI):
             # 预设航线 (3个)
             DroneListRoutesTool(),
             DroneLoadRouteTool(),
-            DroneSaveRouteTool()
+            DroneSaveRouteTool(),
+            # 视觉分析 (3个)
+            VisionAnalysisTool(),
+            DetectObstaclesTool(),
+            FindObjectTool()
         ]
 
         # 创建Agent实例
@@ -184,7 +192,8 @@ async def root():
             "control": ["drone_takeoff", "drone_land", "drone_emergency_stop", "drone_fly_direction", "drone_go_to", "get_drone_status"],
             "mission": ["drone_mission", "drone_mission_control"],
             "exploration": ["drone_exploration_start", "drone_exploration_stop", "drone_exploration_pause", "drone_exploration_status"],
-            "routes": ["drone_list_routes", "drone_load_route", "drone_save_route"]
+            "routes": ["drone_list_routes", "drone_load_route", "drone_save_route"],
+            "vision": ["analyze_camera_view", "detect_obstacles", "find_object"]
         },
         "endpoints": {
             "chat_http": "POST /api/agent/chat",

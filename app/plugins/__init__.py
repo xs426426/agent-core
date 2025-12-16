@@ -21,6 +21,11 @@ from app.plugins.drone_tools import (
     DroneLoadRouteTool,
     DroneSaveRouteTool
 )
+from app.plugins.vision_tools import (
+    VisionAnalysisTool,
+    DetectObstaclesTool,
+    FindObjectTool
+)
 from app.plugins.generic_tools import (
     GenericApiTool,
     ToolFactory
@@ -52,5 +57,9 @@ __all__ = [
     # 无人机 - 预设航线
     "DroneListRoutesTool",
     "DroneLoadRouteTool",
-    "DroneSaveRouteTool"
+    "DroneSaveRouteTool",
+    # 视觉分析
+    "VisionAnalysisTool",
+    "DetectObstaclesTool",
+    "FindObjectTool"
 ]
